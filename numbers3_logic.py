@@ -45,7 +45,7 @@ TICKET_COST = 200
 
 
 def configure_japanese_fonts(preferred=None):
-    font_path = "ipaexg.ttf", "ipaexm.ttf"
+    font_path = "ipaexg.ttf"
 
     if Path(font_path).exists():
         font_manager.fontManager.addfont(font_path)
@@ -884,6 +884,7 @@ class Numbers3Backtester:
             **{k: int(result_df[k].sum()) for k in result_df.columns if k.startswith("box_top")},
         }
         return result_df, pd.DataFrame([summary])
+
 
 
 
