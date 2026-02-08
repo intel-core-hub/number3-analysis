@@ -1,8 +1,8 @@
 import logging
 import sys
 import os
-import requests  # Slack送信に使用
-from numbers3_logic import update_numbers3_clean, validate_numbers3, HybridPredictor # 予測クラスをインポート
+import requests
+from numbers3_logic import update_numbers3_clean, validate_numbers3, Numbers3Predictor # クラス名を修正
 
 logging.basicConfig(
     level=logging.INFO,
@@ -10,7 +10,6 @@ logging.basicConfig(
 )
 
 def send_slack_message(webhook_url: str, text: str):
-    """Slackにテキスト通知を送るヘルパー関数"""
     if not webhook_url:
         logging.warning("SLACK_WEBHOOK_URL is not set. Skipping notification.")
         return
@@ -41,10 +40,14 @@ def main() -> int:
         if errors:
             logging.warning("Update finished with warnings: %s", errors)
 
-        # 3. 予測の実行 (ステップ1のメイン追加要素)
+        # 3. 予測の実行 (ロジックに合わせて修正)
         logging.info("Generating predictions...")
-        predictor = HybridPredictor(df)
-        prediction_results = predictor.predict_next() # 次回の予想数字を取得するメソッド
+        predictor = Numbers3Predictor(df)
+        # ハイブリッドモデルで上位10個を予測
+        pred_df = predictor.predict(top_n=10, model="hybrid", verbose=False)
+        
+        top_prediction = pred_df.iloc[0]["予測番号"]
+        recommended_numbers = pred_df["予測番号"].tolist()
         
         # 4. Slackメッセージの構築
         latest_round = df.iloc[-1]
@@ -54,8 +57,8 @@ def main() -> int:
             f"当選番号: {latest_round['当選番号']}\n"
             f"----------------------------\n"
             f"🔮 *次回（第{int(latest_round['回号'])+1}回）のAI予測*\n"
-            f"【第1候補】: *{prediction_results['top_prediction']}*\n"
-            f"【推奨数字】: {', '.join(prediction_results['recommended_numbers'])}\n"
+            f"【第1候補】: *{top_prediction}*\n"
+            f"【推奨数字】: {', '.join(recommended_numbers)}\n"
             f"----------------------------\n"
             f"詳細はこちら: https://github.com/{os.getenv('GITHUB_REPOSITORY')}"
         )
@@ -68,7 +71,7 @@ def main() -> int:
         
     except Exception:
         logging.exception("Update failed")
-        error_msg = "❌ ナンバーズ3の自動更新中にエラーが発生しました。ログを確認してください。"
+        error_msg = "❌ ナンバーズ3の自動更新中にエラーが発生しました。"
         send_slack_message(slack_url, error_msg)
         return 1
 
