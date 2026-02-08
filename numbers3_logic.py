@@ -53,6 +53,7 @@ def configure_japanese_fonts(preferred=None):
         plt.rcParams['font.family'] = prop.get_name()
         plt.rcParams['axes.unicode_minus'] = False
         print(f"Font loaded: {prop.get_name()}")
+        return prop.get_name()
     else:
         plt.rcParams['font.family'] = 'sans-serif'
         
@@ -883,5 +884,6 @@ class Numbers3Backtester:
             **{k: int(result_df[k].sum()) for k in result_df.columns if k.startswith("box_top")},
         }
         return result_df, pd.DataFrame([summary])
+
 
 
