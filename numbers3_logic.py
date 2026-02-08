@@ -46,7 +46,16 @@ TICKET_COST = 200
 
 def configure_japanese_fonts(preferred=None):
     font_path = "ipaexg.ttf", "ipaexm.ttf"
-    
+
+    if Path(font_path).exists():
+        font_manager.fontManager.addfont(font_path)
+        prop = fonr_manager.FontProperties(fname=font_path)
+        plt.rcParams['font.family'] = prop.get_name()
+        plt.rcParams['axes.unicode_minus'] = False
+        print(f"Font loaded: {prop.get_name()}")
+    else:
+        plt.rcParams['font.family'] = 'sans-serif'
+        
     if preferred is None:
         preferred = [
             "IPAexGothic",
@@ -874,4 +883,5 @@ class Numbers3Backtester:
             **{k: int(result_df[k].sum()) for k in result_df.columns if k.startswith("box_top")},
         }
         return result_df, pd.DataFrame([summary])
+
 
