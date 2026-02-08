@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import re
 import shutil
+import itertools
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ import seaborn as sns
 import matplotlib as mpl
 from matplotlib import font_manager
 import lightgbm as lgb
+from sklearn.metrics import log_loss
 
 COLUMNS = [
     "回号",
@@ -104,7 +106,10 @@ def _normalize_winning_number_series(series):
 def _add_digit_columns(df):
     df = df.copy()
     if "当選番号" not in df.columns:
-        return df
+        if "当せん番号" in df.columns:
+            df["当選番号"] = df["当せん番号"]
+        else:
+            raise KeyError("当選番号（または当せん番号）列が必要です。")
     num = df["当選番号"].astype(str).str.zfill(3)
     df["digit_h"] = num.str[0].astype(int)
     df["digit_t"] = num.str[1].astype(int)
@@ -181,25 +186,45 @@ def _table_to_records(df):
     return records
 
 
-def fetch_numbers3_by_month(start_date, end_date, sleep_seconds=1, source_templates=None, fail_fast=True):
+def _read_html_tables(url, timeout=10, retries=3, backoff=1.5):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            return pd.read_html(url, header=0)
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                time.sleep(backoff * (attempt + 1))
+    raise last_error
+
+
+def fetch_numbers3_by_month(
+    start_date,
+    end_date,
+    sleep_seconds=1,
+    source_templates=None,
+    fail_fast=True,
+    timeout=10,
+    retries=3,
+    backoff=1.5,
+):
     rows = []
     failures = []
     current = datetime(start_date.year, start_date.month, 1)
     last_month = datetime(end_date.year, end_date.month, 1)
 
-    # Use provided templates or default single source
     if source_templates is None:
         source_templates = ["https://takarakuji.rakuten.co.jp/backnumber/numbers3/{yyyymm}/"]
 
     while current <= last_month:
         yyyymm = current.strftime("%Y%m")
-        print(f"取得中: {yyyymm}...")
-
-        last_exc = None
+        month_ok = False
+        month_errors = []
         for template in source_templates:
             url = template.format(yyyymm=yyyymm)
+            print(f"取得中: {yyyymm}...")
             try:
-                tables = _read_html_tables(url)
+                tables = _read_html_tables(url, timeout=timeout, retries=retries, backoff=backoff)
                 for df in tables:
                     records = _table_to_records(df)
                     for record in records:
@@ -208,26 +233,25 @@ def fetch_numbers3_by_month(start_date, end_date, sleep_seconds=1, source_templa
                         row = _normalize_record(record)
                         if row.get("回号") and row.get("当選番号"):
                             rows.append(row)
-                time.sleep(sleep_seconds)
-                last_exc = None
+                month_ok = True
                 break
             except Exception as e:
-                last_exc = e
-                continue
+                month_errors.append({"month": yyyymm, "url": url, "error": str(e)})
+                if fail_fast:
+                    raise
 
-        if last_exc is not None:
-            failures.append({"month": yyyymm, "error": str(last_exc)})
-            if fail_fast:
-                raise last_exc
+        if not month_ok and month_errors:
+            failures.append(month_errors[-1])
+            print(f"スキップ ({yyyymm}): {month_errors[-1]['error']}")
+
+        time.sleep(sleep_seconds)
 
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
 
-    df_out = pd.DataFrame(rows)
-    return df_out, failures if source_templates is not None else df_out
-
-
-def _read_html_tables(url, timeout=10, retries=3, backoff=1.5):
-    return pd.read_html(url, header=0)
+    result_df = pd.DataFrame(rows)
+    if source_templates is not None or not fail_fast:
+        return result_df, failures
+    return result_df
 
 
 def _coverage_ratio(df):
@@ -820,6 +844,27 @@ class Numbers3MLPredictor:
         self.num_boost_round = num_boost_round
         self.random_state = random_state
         self.models = {}
+        self.best_params = None
+
+    def _feature_columns(self):
+        return [
+            "weekday",
+            "weekday_sin",
+            "weekday_cos",
+            "prev_n1",
+            "prev_n2",
+            "prev_n3",
+            "digit_sum",
+            "odd_count",
+            "big_count",
+            "prev_sum",
+            "prev_odd_count",
+            "prev_big_count",
+            "sum_ma_5",
+            "sum_ma_10",
+            "sum_std_5",
+            "sum_std_10",
+        ]
 
     def _prepare_training_data(self):
         df = self.df.copy()
@@ -831,6 +876,8 @@ class Numbers3MLPredictor:
 
         df["dt"] = pd.to_datetime(df.get("抽せん日"), errors="coerce")
         df["weekday"] = df["dt"].dt.weekday
+        df["weekday_sin"] = np.sin(2 * np.pi * df["weekday"] / 7)
+        df["weekday_cos"] = np.cos(2 * np.pi * df["weekday"] / 7)
 
         num = df["当選番号"].astype(str).str.zfill(3)
         df["n1"] = num.str[0].astype(int)
@@ -838,26 +885,85 @@ class Numbers3MLPredictor:
         df["n3"] = num.str[2].astype(int)
 
         df["digit_sum"] = df[["n1", "n2", "n3"]].sum(axis=1)
+        df["odd_count"] = (df[["n1", "n2", "n3"]] % 2 == 1).sum(axis=1)
+        df["big_count"] = (df[["n1", "n2", "n3"]] >= 5).sum(axis=1)
         df["sum_ma_5"] = df["digit_sum"].rolling(self.window_short, min_periods=1).mean()
         df["sum_ma_10"] = df["digit_sum"].rolling(self.window_long, min_periods=1).mean()
+        df["sum_std_5"] = df["digit_sum"].rolling(self.window_short, min_periods=1).std().fillna(0)
+        df["sum_std_10"] = df["digit_sum"].rolling(self.window_long, min_periods=1).std().fillna(0)
 
         for col in ["n1", "n2", "n3"]:
             df[f"prev_{col}"] = df[col].shift(1)
+
+        df["prev_sum"] = df["digit_sum"].shift(1)
+        df["prev_odd_count"] = df["odd_count"].shift(1)
+        df["prev_big_count"] = df["big_count"].shift(1)
 
         df["target_n1"] = df["n1"].shift(-1)
         df["target_n2"] = df["n2"].shift(-1)
         df["target_n3"] = df["n3"].shift(-1)
 
-        features = ["weekday", "prev_n1", "prev_n2", "prev_n3", "sum_ma_5", "sum_ma_10"]
+        features = self._feature_columns()
         target_cols = ["target_n1", "target_n2", "target_n3"]
         train_df = df.dropna(subset=features + target_cols)
         return train_df, features
+
+    def tune_hyperparams(self, param_grid=None, valid_size=180):
+        train_df, features = self._prepare_training_data()
+        if len(train_df) <= valid_size + 10:
+            raise ValueError("ハイパーパラ調整に必要なデータ量が不足しています。")
+
+        if param_grid is None:
+            param_grid = {
+                "learning_rate": [0.05, 0.1],
+                "num_leaves": [15, 31, 63],
+                "max_depth": [-1, 6],
+                "min_child_samples": [10, 20, 40],
+            }
+
+        train_split = train_df.iloc[:-valid_size]
+        valid_split = train_df.iloc[-valid_size:]
+
+        X_train = train_split[features]
+        X_valid = valid_split[features]
+
+        best_score = None
+        best_params = None
+
+        keys = list(param_grid.keys())
+        for values in itertools.product(*[param_grid[k] for k in keys]):
+            params = dict(zip(keys, values))
+            scores = []
+            for digit in ["n1", "n2", "n3"]:
+                y_train = train_split[f"target_{digit}"].astype(int)
+                y_valid = valid_split[f"target_{digit}"].astype(int)
+
+                model = lgb.LGBMClassifier(
+                    objective="multiclass",
+                    num_class=10,
+                    n_estimators=self.num_boost_round,
+                    random_state=self.random_state,
+                    n_jobs=-1,
+                    **params,
+                )
+                model.fit(X_train, y_train)
+                proba = model.predict_proba(X_valid)
+                scores.append(log_loss(y_valid, proba, labels=list(range(10))))
+
+            avg_score = float(np.mean(scores))
+            if best_score is None or avg_score < best_score:
+                best_score = avg_score
+                best_params = params
+
+        self.best_params = best_params
+        return {"best_params": best_params, "valid_logloss": best_score}
 
     def train(self):
         train_df, features = self._prepare_training_data()
         if len(train_df) < 50:
             raise ValueError("学習に必要なデータ量が不足しています。")
 
+        model_params = self.best_params or {}
         for digit in ["n1", "n2", "n3"]:
             X = train_df[features]
             y = train_df[f"target_{digit}"].astype(int)
@@ -867,6 +973,7 @@ class Numbers3MLPredictor:
                 n_estimators=self.num_boost_round,
                 random_state=self.random_state,
                 n_jobs=-1,
+                **model_params,
             )
             model.fit(X, y)
             self.models[digit] = model
@@ -887,9 +994,18 @@ class Numbers3MLPredictor:
         df["n2"] = num.str[1].astype(int)
         df["n3"] = num.str[2].astype(int)
         df["digit_sum"] = df[["n1", "n2", "n3"]].sum(axis=1)
+        df["odd_count"] = (df[["n1", "n2", "n3"]] % 2 == 1).sum(axis=1)
+        df["big_count"] = (df[["n1", "n2", "n3"]] >= 5).sum(axis=1)
 
         sum_ma_5 = df["digit_sum"].tail(self.window_short).mean()
         sum_ma_10 = df["digit_sum"].tail(self.window_long).mean()
+        sum_std_5 = df["digit_sum"].tail(self.window_short).std()
+        sum_std_10 = df["digit_sum"].tail(self.window_long).std()
+
+        if pd.isna(sum_std_5):
+            sum_std_5 = 0.0
+        if pd.isna(sum_std_10):
+            sum_std_10 = 0.0
 
         last_row = df.iloc[-1]
         last_dt = last_row["dt"]
@@ -902,16 +1018,29 @@ class Numbers3MLPredictor:
         else:
             next_weekday = (last_dt + timedelta(days=1)).weekday()
 
+        weekday_sin = np.sin(2 * np.pi * next_weekday / 7)
+        weekday_cos = np.cos(2 * np.pi * next_weekday / 7)
+
         feature_row = pd.DataFrame(
             [[
                 next_weekday,
+                float(weekday_sin),
+                float(weekday_cos),
                 int(last_row["n1"]),
                 int(last_row["n2"]),
                 int(last_row["n3"]),
+                int(last_row["digit_sum"]),
+                int(last_row["odd_count"]),
+                int(last_row["big_count"]),
+                int(last_row["digit_sum"]),
+                int(last_row["odd_count"]),
+                int(last_row["big_count"]),
                 float(sum_ma_5),
                 float(sum_ma_10),
+                float(sum_std_5),
+                float(sum_std_10),
             ]],
-            columns=["weekday", "prev_n1", "prev_n2", "prev_n3", "sum_ma_5", "sum_ma_10"],
+            columns=self._feature_columns(),
         )
         return feature_row
 
@@ -1029,6 +1158,95 @@ class Numbers3Backtester:
             else 0.0,
             **{k: int(result_df[k].sum()) for k in result_df.columns if k.startswith("st_top")},
             **{k: int(result_df[k].sum()) for k in result_df.columns if k.startswith("box_top")},
+        }
+        return result_df, pd.DataFrame([summary])
+
+
+class Numbers3MLBacktester:
+    def __init__(
+        self,
+        df,
+        window=300,
+        test_rounds=50,
+        valid_size=180,
+        tune_every=None,
+        param_grid=None,
+        num_boost_round=120,
+        random_state=42,
+    ):
+        self.df = df.sort_values("回号").reset_index(drop=True)
+        self.window = window
+        self.test_rounds = test_rounds
+        self.valid_size = valid_size
+        self.tune_every = tune_every
+        self.param_grid = param_grid
+        self.num_boost_round = num_boost_round
+        self.random_state = random_state
+
+    def run(self):
+        results = []
+        total_return = 0
+        total_cost = 0
+        set_straight_hits = 0
+        set_box_hits = 0
+
+        total = min(self.test_rounds, len(self.df) - 2)
+        for i in range(total):
+            train_end = len(self.df) - 2 - i
+            train_start = max(0, train_end - self.window)
+            train_df = self.df.iloc[train_start : train_end + 1].copy()
+
+            actual_row = self.df.iloc[train_end + 1]
+            actual_num = str(actual_row["当選番号"]).zfill(3)
+            actual_box = _box_key(actual_num)
+
+            predictor = Numbers3MLPredictor(
+                train_df,
+                num_boost_round=self.num_boost_round,
+                random_state=self.random_state,
+            )
+
+            if self.tune_every and i % self.tune_every == 0:
+                predictor.tune_hyperparams(param_grid=self.param_grid, valid_size=self.valid_size)
+
+            predictor.train()
+            top_pick = predictor.predict_next()
+
+            prize, hit_type = evaluate_set_profit(actual_num, top_pick)
+            profit = prize - TICKET_COST
+            total_return += prize
+            total_cost += TICKET_COST
+            if hit_type == "セット・ストレート":
+                set_straight_hits += 1
+            elif hit_type == "セット・ボックス":
+                set_box_hits += 1
+
+            results.append(
+                {
+                    "target_round": int(actual_row["回号"]) if pd.notna(actual_row["回号"]) else None,
+                    "actual": actual_num,
+                    "set_pick": top_pick,
+                    "set_hit": hit_type,
+                    "set_prize": prize,
+                    "set_profit": profit,
+                    "match_exact": int(actual_num == top_pick),
+                    "match_box": int(actual_box == _box_key(top_pick)),
+                }
+            )
+
+        result_df = pd.DataFrame(results)
+        summary = {
+            "tested": len(result_df),
+            "set_straight_hits": set_straight_hits,
+            "set_box_hits": set_box_hits,
+            "total_return": total_return,
+            "total_cost": total_cost,
+            "total_profit": total_return - total_cost,
+            "roi_pct": round((total_return - total_cost) / total_cost * 100.0, 2)
+            if total_cost > 0
+            else 0.0,
+            "exact_hits": int(result_df["match_exact"].sum()) if not result_df.empty else 0,
+            "box_hits": int(result_df["match_box"].sum()) if not result_df.empty else 0,
         }
         return result_df, pd.DataFrame([summary])
 

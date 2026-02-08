@@ -1,24 +1,48 @@
-import os
-import pytest
+from datetime import datetime, timedelta
+
 import pandas as pd
 
 from numbers3_logic import Numbers3MLPredictor
 
 
-def test_ml_predictor_smoke():
-    csv_path = os.path.join(os.path.dirname(__file__), '..', 'numbers3_clean.csv')
-    csv_path = os.path.normpath(csv_path)
-    if not os.path.exists(csv_path):
-        pytest.skip("numbers3_clean.csv が見つかりません。自動更新を先に実行してください。")
+def _make_sample_df(count=80):
+    start = datetime(2024, 1, 1)
+    rows = []
+    for i in range(count):
+        draw_date = start + timedelta(days=i)
+        num = f"{i % 10}{(i * 3) % 10}{(i * 7) % 10}"
+        rows.append(
+            {
+                "回号": str(1000 + i),
+                "抽せん日": draw_date.strftime("%Y-%m-%d"),
+                "当選番号": num,
+            }
+        )
+    return pd.DataFrame(rows)
 
-    df = pd.read_csv(csv_path)
-    if len(df) < 60:
-        pytest.skip("データ件数が少ないため ML 学習テストをスキップします。")
 
-    ml = Numbers3MLPredictor(df, num_boost_round=20)
-    ml.train()
-    pred = ml.predict_next()
+def test_ml_predictor_train_and_predict():
+    df = _make_sample_df()
+    predictor = Numbers3MLPredictor(df, num_boost_round=10, random_state=0)
+    predictor.train()
+    result = predictor.predict_next()
+    assert isinstance(result, str)
+    assert len(result) == 3
+    assert result.isdigit()
 
-    assert isinstance(pred, str)
-    assert len(pred) == 3
-    assert pred.isdigit()
+
+def test_ml_predictor_tune_hyperparams():
+    df = _make_sample_df(count=120)
+    predictor = Numbers3MLPredictor(df, num_boost_round=5, random_state=1)
+    result = predictor.tune_hyperparams(
+        param_grid={
+            "learning_rate": [0.1],
+            "num_leaves": [15, 31],
+            "max_depth": [-1],
+            "min_child_samples": [10],
+        },
+        valid_size=20,
+    )
+    assert isinstance(result, dict)
+    assert "best_params" in result
+    assert "valid_logloss" in result
