@@ -1,28 +1,45 @@
-name: Daily Numbers3 Update
+name: Daily Numbers3 Data Update
 
 on:
   schedule:
-    # 毎日 日本時間 20:30 (UTC 11:30) に実行
-    - cron: '30 11 * * *'
-  workflow_dispatch: # 手動で「今すぐ実行」ボタンを出す設定
+    - cron: "30 11 * * *"
+  workflow_dispatch:
 
 jobs:
   update:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # これが書き込み許可になります
+      contents: write
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: "3.11"
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run update
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run update script
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python auto_update.py
-      - name: Commit changes
+
+      - name: Commit and push if changed
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add numbers3_clean.csv
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update data" && git push)
+          
+          # 変更がある場合のみ実行
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-update Numbers3 data"
+            # 競合回避のための魔法の1行
+            git pull --rebase origin main
+            git push origin main
+          fi
