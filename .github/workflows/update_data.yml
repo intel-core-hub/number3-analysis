@@ -36,7 +36,7 @@ jobs:
           git config --local user.name "GitHub Action"
           git add numbers3_clean.csv
           
-          # ここが重要：最新の状態を取り込んでから合体させる
+          # 変更がある場合のみ、最新を取り込んでからプッシュ
           if ! git diff --cached --quiet; then
             git commit -m "Auto-update Numbers3 data"
             git pull --rebase origin main
