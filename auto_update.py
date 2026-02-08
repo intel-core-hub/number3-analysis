@@ -2,7 +2,12 @@ import logging
 import sys
 import os
 import requests
-from numbers3_logic import update_numbers3_clean, validate_numbers3, Numbers3Predictor # クラス名を修正
+from numbers3_logic import (
+    update_numbers3_clean,
+    validate_numbers3,
+    Numbers3Predictor,
+    Numbers3MLPredictor,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,8 +54,18 @@ def main() -> int:
         top_prediction = pred_df.iloc[0]["予測番号"]
         recommended_numbers = pred_df["予測番号"].tolist()
         
-        # 4. Slackメッセージの構築
+        # 4. 機械学習予測
+        ml_result = None
+        try:
+            ml_predictor = Numbers3MLPredictor(df)
+            ml_predictor.train()
+            ml_result = ml_predictor.predict_next()
+        except Exception as ml_error:
+            logging.warning("ML prediction failed: %s", ml_error)
+
+        # 5. Slackメッセージの構築
         latest_round = df.iloc[-1]
+        ml_text = ml_result if ml_result else "N/A"
         msg = (
             f"✅ *ナンバーズ3 データ更新完了*\n"
             f"最新回号: 第{int(latest_round['回号'])}回\n"
@@ -59,11 +74,12 @@ def main() -> int:
             f"🔮 *次回（第{int(latest_round['回号'])+1}回）のAI予測*\n"
             f"【第1候補】: *{top_prediction}*\n"
             f"【推奨数字】: {', '.join(recommended_numbers)}\n"
+            f"🤖 *機械学習(LGBM)予測*: *{ml_text}*\n"
             f"----------------------------\n"
             f"詳細はこちら: https://github.com/{os.getenv('GITHUB_REPOSITORY')}"
         )
         
-        # 5. Slack通知の送信
+        # 6. Slack通知の送信
         send_slack_message(slack_url, msg)
         
         logging.info("Update and notification finished successfully.")

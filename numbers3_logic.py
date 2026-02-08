@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib as mpl
 from matplotlib import font_manager
+import lightgbm as lgb
 
 COLUMNS = [
     "回号",
@@ -100,6 +101,17 @@ def _normalize_winning_number_series(series):
     return cleaned.apply(lambda x: x.zfill(3) if isinstance(x, str) else None)
 
 
+def _add_digit_columns(df):
+    df = df.copy()
+    if "当選番号" not in df.columns:
+        return df
+    num = df["当選番号"].astype(str).str.zfill(3)
+    df["digit_h"] = num.str[0].astype(int)
+    df["digit_t"] = num.str[1].astype(int)
+    df["digit_o"] = num.str[2].astype(int)
+    return df
+
+
 def _normalize_record(record):
     row = {}
 
@@ -169,33 +181,53 @@ def _table_to_records(df):
     return records
 
 
-def fetch_numbers3_by_month(start_date, end_date, sleep_seconds=1):
+def fetch_numbers3_by_month(start_date, end_date, sleep_seconds=1, source_templates=None, fail_fast=True):
     rows = []
+    failures = []
     current = datetime(start_date.year, start_date.month, 1)
     last_month = datetime(end_date.year, end_date.month, 1)
 
+    # Use provided templates or default single source
+    if source_templates is None:
+        source_templates = ["https://takarakuji.rakuten.co.jp/backnumber/numbers3/{yyyymm}/"]
+
     while current <= last_month:
         yyyymm = current.strftime("%Y%m")
-        url = f"https://takarakuji.rakuten.co.jp/backnumber/numbers3/{yyyymm}/"
         print(f"取得中: {yyyymm}...")
 
-        try:
-            tables = pd.read_html(url, header=0)
-            for df in tables:
-                records = _table_to_records(df)
-                for record in records:
-                    if "当選番号" not in record and "当せん番号" not in record:
-                        continue
-                    row = _normalize_record(record)
-                    if row.get("回号") and row.get("当選番号"):
-                        rows.append(row)
-            time.sleep(sleep_seconds)
-        except Exception as e:
-            print(f"スキップ ({yyyymm}): {e}")
+        last_exc = None
+        for template in source_templates:
+            url = template.format(yyyymm=yyyymm)
+            try:
+                tables = _read_html_tables(url)
+                for df in tables:
+                    records = _table_to_records(df)
+                    for record in records:
+                        if "当選番号" not in record and "当せん番号" not in record:
+                            continue
+                        row = _normalize_record(record)
+                        if row.get("回号") and row.get("当選番号"):
+                            rows.append(row)
+                time.sleep(sleep_seconds)
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                continue
+
+        if last_exc is not None:
+            failures.append({"month": yyyymm, "error": str(last_exc)})
+            if fail_fast:
+                raise last_exc
 
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
 
-    return pd.DataFrame(rows)
+    df_out = pd.DataFrame(rows)
+    return df_out, failures if source_templates is not None else df_out
+
+
+def _read_html_tables(url, timeout=10, retries=3, backoff=1.5):
+    return pd.read_html(url, header=0)
 
 
 def _coverage_ratio(df):
@@ -778,6 +810,121 @@ class Numbers3Predictor:
             )
 
         return df_pred.head(top_n)
+
+
+class Numbers3MLPredictor:
+    def __init__(self, df, window_short=5, window_long=10, num_boost_round=120, random_state=42):
+        self.df = normalize_numbers3_columns(df).copy()
+        self.window_short = window_short
+        self.window_long = window_long
+        self.num_boost_round = num_boost_round
+        self.random_state = random_state
+        self.models = {}
+
+    def _prepare_training_data(self):
+        df = self.df.copy()
+        if "当選番号" not in df.columns:
+            if "当せん番号" in df.columns:
+                df["当選番号"] = df["当せん番号"]
+            else:
+                raise KeyError("当選番号（または当せん番号）列が必要です。")
+
+        df["dt"] = pd.to_datetime(df.get("抽せん日"), errors="coerce")
+        df["weekday"] = df["dt"].dt.weekday
+
+        num = df["当選番号"].astype(str).str.zfill(3)
+        df["n1"] = num.str[0].astype(int)
+        df["n2"] = num.str[1].astype(int)
+        df["n3"] = num.str[2].astype(int)
+
+        df["digit_sum"] = df[["n1", "n2", "n3"]].sum(axis=1)
+        df["sum_ma_5"] = df["digit_sum"].rolling(self.window_short, min_periods=1).mean()
+        df["sum_ma_10"] = df["digit_sum"].rolling(self.window_long, min_periods=1).mean()
+
+        for col in ["n1", "n2", "n3"]:
+            df[f"prev_{col}"] = df[col].shift(1)
+
+        df["target_n1"] = df["n1"].shift(-1)
+        df["target_n2"] = df["n2"].shift(-1)
+        df["target_n3"] = df["n3"].shift(-1)
+
+        features = ["weekday", "prev_n1", "prev_n2", "prev_n3", "sum_ma_5", "sum_ma_10"]
+        target_cols = ["target_n1", "target_n2", "target_n3"]
+        train_df = df.dropna(subset=features + target_cols)
+        return train_df, features
+
+    def train(self):
+        train_df, features = self._prepare_training_data()
+        if len(train_df) < 50:
+            raise ValueError("学習に必要なデータ量が不足しています。")
+
+        for digit in ["n1", "n2", "n3"]:
+            X = train_df[features]
+            y = train_df[f"target_{digit}"].astype(int)
+            model = lgb.LGBMClassifier(
+                objective="multiclass",
+                num_class=10,
+                n_estimators=self.num_boost_round,
+                random_state=self.random_state,
+                n_jobs=-1,
+            )
+            model.fit(X, y)
+            self.models[digit] = model
+
+        return self
+
+    def _build_latest_features(self):
+        df = self.df.copy()
+        if "当選番号" not in df.columns:
+            if "当せん番号" in df.columns:
+                df["当選番号"] = df["当せん番号"]
+            else:
+                raise KeyError("当選番号（または当せん番号）列が必要です。")
+
+        df["dt"] = pd.to_datetime(df.get("抽せん日"), errors="coerce")
+        num = df["当選番号"].astype(str).str.zfill(3)
+        df["n1"] = num.str[0].astype(int)
+        df["n2"] = num.str[1].astype(int)
+        df["n3"] = num.str[2].astype(int)
+        df["digit_sum"] = df[["n1", "n2", "n3"]].sum(axis=1)
+
+        sum_ma_5 = df["digit_sum"].tail(self.window_short).mean()
+        sum_ma_10 = df["digit_sum"].tail(self.window_long).mean()
+
+        last_row = df.iloc[-1]
+        last_dt = last_row["dt"]
+        if pd.isna(last_dt):
+            valid_dates = df["dt"].dropna()
+            last_dt = valid_dates.iloc[-1] if not valid_dates.empty else None
+
+        if last_dt is None or pd.isna(last_dt):
+            next_weekday = 0
+        else:
+            next_weekday = (last_dt + timedelta(days=1)).weekday()
+
+        feature_row = pd.DataFrame(
+            [[
+                next_weekday,
+                int(last_row["n1"]),
+                int(last_row["n2"]),
+                int(last_row["n3"]),
+                float(sum_ma_5),
+                float(sum_ma_10),
+            ]],
+            columns=["weekday", "prev_n1", "prev_n2", "prev_n3", "sum_ma_5", "sum_ma_10"],
+        )
+        return feature_row
+
+    def predict_next(self):
+        if not self.models:
+            raise ValueError("モデルが学習されていません。train() を先に呼び出してください。")
+
+        X_test = self._build_latest_features()
+        result = ""
+        for digit in ["n1", "n2", "n3"]:
+            proba = self.models[digit].predict_proba(X_test)
+            result += str(int(np.argmax(proba, axis=1)[0]))
+        return result
 
 
 def _box_key(number_str):
