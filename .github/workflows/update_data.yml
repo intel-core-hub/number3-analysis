@@ -35,12 +35,10 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add numbers3_clean.csv
+          
+          # ここが重要：最新の状態を取り込んでから合体させる
           if ! git diff --cached --quiet; then
             git commit -m "Auto-update Numbers3 data"
-            git pull --rebase origin main
-            git push origin main
-          fi
-            # 競合回避のための魔法の1行
             git pull --rebase origin main
             git push origin main
           fi
