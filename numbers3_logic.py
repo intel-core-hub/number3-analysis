@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import shutil
 import itertools
+import os
 
 import numpy as np
 import pandas as pd
@@ -80,6 +81,14 @@ def configure_japanese_fonts(preferred=None):
 
 
 def normalize_numbers3_columns(df):
+    if df is None:
+        raise ValueError("normalize_numbers3_columns: df is None")
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(
+            f"normalize_numbers3_columns: expected DataFrame, got {type(df)}"
+        )
+
     df = df.copy()
     for old, new in ALIAS_MAP.items():
         if old in df.columns:
@@ -89,6 +98,7 @@ def normalize_numbers3_columns(df):
             else:
                 df = df.rename(columns={old: new})
     return df
+
 
 
 def _clean_digits(value):
@@ -209,20 +219,21 @@ def fetch_numbers3_by_month(
     backoff=1.5,
 ):
     rows = []
-    failures = []
+
     current = datetime(start_date.year, start_date.month, 1)
     last_month = datetime(end_date.year, end_date.month, 1)
 
     if source_templates is None:
-        source_templates = ["https://takarakuji.rakuten.co.jp/backnumber/numbers3/{yyyymm}/"]
+        source_templates = [
+            "https://takarakuji.rakuten.co.jp/backnumber/numbers3/{yyyymm}/"
+        ]
 
     while current <= last_month:
         yyyymm = current.strftime("%Y%m")
-        month_ok = False
-        month_errors = []
+        success = False
+
         for template in source_templates:
             url = template.format(yyyymm=yyyymm)
-            print(f"取得中: {yyyymm}...")
             try:
                 tables = _read_html_tables(url, timeout=timeout, retries=retries, backoff=backoff)
                 for df in tables:
@@ -233,26 +244,20 @@ def fetch_numbers3_by_month(
                         row = _normalize_record(record)
                         if row.get("回号") and row.get("当選番号"):
                             rows.append(row)
-                month_ok = True
+                success = True
                 break
             except Exception as e:
-                month_errors.append({"month": yyyymm, "url": url, "error": str(e)})
                 if fail_fast:
                     raise
+                print(f"[WARN] {yyyymm} failed: {e}")
 
-        if not month_ok and month_errors:
-            failures.append(month_errors[-1])
-            print(f"スキップ ({yyyymm}): {month_errors[-1]['error']}")
+        if not success:
+            print(f"[SKIP] {yyyymm}")
 
         time.sleep(sleep_seconds)
-
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
 
-    result_df = pd.DataFrame(rows)
-    if source_templates is not None or not fail_fast:
-        return result_df, failures
-    return result_df
-
+    return pd.DataFrame(rows)
 
 def _coverage_ratio(df):
     if "回号" not in df.columns:
@@ -274,63 +279,64 @@ def update_numbers3_clean(
     force_full=False,
 ):
     path = Path(clean_path)
+
+    # === 既存データ読み込み ===
     if path.exists() and not force_full:
         df_existing = pd.read_csv(path)
         df_existing = normalize_numbers3_columns(df_existing)
         if "当選番号" in df_existing.columns:
-            df_existing["当選番号"] = _normalize_winning_number_series(df_existing["当選番号"])
+            df_existing["当選番号"] = _normalize_winning_number_series(
+                df_existing["当選番号"]
+            )
     else:
         df_existing = pd.DataFrame(columns=COLUMNS)
 
-    if force_full:
+    # === 取得開始日決定 ===
+    if force_full or df_existing.empty:
         start_date = datetime(1994, 10, 1)
     else:
-        coverage = _coverage_ratio(df_existing)
-        if coverage is not None and coverage < 0.9:
-            print("既存データが疎なため、全期間を再取得します。")
-            df_existing = pd.DataFrame(columns=COLUMNS)
+        dates = pd.to_datetime(df_existing.get("抽せん日"), errors="coerce")
+        last_date = dates.max()
+        if pd.isna(last_date):
             start_date = datetime(1994, 10, 1)
-        elif not df_existing.empty and "抽せん日" in df_existing.columns:
-            dates = pd.to_datetime(df_existing["抽せん日"], errors="coerce")
-            last_date = dates.max()
-            if pd.isna(last_date):
-                start_date = datetime(1994, 10, 1)
-            else:
-                start_date = datetime(last_date.year, last_date.month, 1)
         else:
-            start_date = datetime(1994, 10, 1)
+            start_date = datetime(last_date.year, last_date.month, 1)
 
-    new_df = fetch_numbers3_by_month(start_date, datetime.now(), sleep_seconds=sleep_seconds)
+    # === 新規取得 ===
+    new_df = fetch_numbers3_by_month(
+        start_date,
+        datetime.now(),
+        sleep_seconds=sleep_seconds,
+    )
+
+    if new_df is None or new_df.empty:
+        print("新規データなし。既存データを返します。")
+        return df_existing
+
     new_df = normalize_numbers3_columns(new_df)
     if "当選番号" in new_df.columns:
         new_df["当選番号"] = _normalize_winning_number_series(new_df["当選番号"])
 
-    if new_df.empty:
-        print("新規データなし。")
-        return df_existing
-
+    # === 結合 ===
     combined = pd.concat([df_existing, new_df], ignore_index=True)
     combined = normalize_numbers3_columns(combined)
-    if "当選番号" in combined.columns:
-        combined["当選番号"] = _normalize_winning_number_series(combined["当選番号"])
+
     if "回号" in combined.columns:
         combined["回号"] = combined["回号"].astype(str).str.zfill(4)
         combined = combined.drop_duplicates(subset=["回号"], keep="last")
-        combined = combined.sort_values(by="回号", key=lambda s: s.astype(int))
+        combined = combined.sort_values("回号", key=lambda s: s.astype(int))
 
     ordered_cols = [c for c in COLUMNS if c in combined.columns]
-    if ordered_cols:
-        combined = combined[ordered_cols]
+    combined = combined[ordered_cols]
 
+    # === バックアップ ===
     if backup and path.exists():
-        backup_path = path.with_suffix(path.suffix + ".bak")
-        shutil.copy2(path, backup_path)
-        print(f"バックアップ保存: {backup_path}")
+        shutil.copy2(path, path.with_suffix(".csv.bak"))
 
     combined.to_csv(path, index=False, encoding="utf-8-sig")
-    print(f"更新完了: {len(combined)}件を {path.name} に保存しました。")
-    return combined
+    print(f"更新完了: {len(combined)} 件")
 
+    return combined
 
 def backfill_numbers3_range(clean_path, start_date, end_date, backup=True, sleep_seconds=1):
     path = Path(clean_path)
@@ -416,6 +422,45 @@ def validate_numbers3(df, strict=True, allow_missing_rounds=True):
 
     return errors + warnings
 
+def extract_feature_importance(predictor, save_path="results/feature_importance.csv"):
+    """
+    学習済みモデルから特徴量重要度を抽出
+    
+    Args:
+        predictor: 学習済みのNumbers3MLPredictorインスタンス
+        save_path (str): 保存先CSVパス
+    
+    Returns:
+        pd.DataFrame: 特徴量重要度のDataFrame
+    """
+    if not predictor.models:
+        raise ValueError("モデルが学習されていません。")
+    
+    # 特徴量名を取得
+    feature_names = predictor._feature_columns()
+    
+    # 各桁のモデルから重要度を取得
+    importance_data = []
+    
+    for digit in ["n1", "n2", "n3"]:
+        model = predictor.models[digit]
+        importances = model.feature_importances_
+        
+        for feature_name, importance in zip(feature_names, importances):
+            importance_data.append({
+                "digit": digit,
+                "feature": feature_name,
+                "importance": importance
+            })
+    
+    # DataFrameに変換
+    df_importance = pd.DataFrame(importance_data)
+    
+    # 保存
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    df_importance.to_csv(save_path, index=False, encoding="utf-8-sig")
+    
+    return df_importance
 
 class Numbers3FeatureEngineer:
     def __init__(self, window=20):
@@ -1173,6 +1218,8 @@ class Numbers3MLBacktester:
         param_grid=None,
         num_boost_round=120,
         random_state=42,
+        track_performance=True,
+        performance_csv="results/ml_performance_tracking.csv",
     ):
         self.df = df.sort_values("回号").reset_index(drop=True)
         self.window = window
@@ -1182,15 +1229,26 @@ class Numbers3MLBacktester:
         self.param_grid = param_grid
         self.num_boost_round = num_boost_round
         self.random_state = random_state
+        self.track_performance = track_performance
+        self.performance_csv = performance_csv
 
     def run(self):
         results = []
+        performance_records = []
         total_return = 0
         total_cost = 0
         set_straight_hits = 0
         set_box_hits = 0
 
+        backtest_id = f"bt_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
         total = min(self.test_rounds, len(self.df) - 2)
+
+        print(f"\n{'=' * 60}")
+        print(f"Starting ML Backtest: (ID:{backtest_id})")
+        print(f"Test rounds: {total}, Window: {self.window}, Boost rounds: {self.num_boost_round}")
+        print(f"{'=' * 60}\n")
+
         for i in range(total):
             train_end = len(self.df) - 2 - i
             train_start = max(0, train_end - self.window)
@@ -1200,22 +1258,43 @@ class Numbers3MLBacktester:
             actual_num = str(actual_row["当選番号"]).zfill(3)
             actual_box = _box_key(actual_num)
 
-            predictor = Numbers3MLPredictor(
-                train_df,
-                num_boost_round=self.num_boost_round,
-                random_state=self.random_state,
-            )
-
+            # ハイパーパラメータチューニング
+            best_params = None
             if self.tune_every and i % self.tune_every == 0:
-                predictor.tune_hyperparams(param_grid=self.param_grid, valid_size=self.valid_size)
+                print(f"[Round {i+1}/{total}] Tuning hyperparameters...")
+                predictor = Numbers3MLPredictor(
+                    train_df,
+                    num_boost_round=self.num_boost_round,
+                    random_state=self.random_state,
+                )
+                tune_result = predictor.tune_hyperparams(
+                    param_grid=self.param_grid,
+                    valid_size=self.valid_size,
+                )
+                best_params = tune_result["best_params"]
+                print(f"  Best params: {best_params}")
+                predictor.best_params = best_params
+                predictor.train()
+            else:
+                predictor = Numbers3MLPredictor(
+                    train_df,
+                    num_boost_round=self.num_boost_round,
+                    random_state=self.random_state,
+                )
+                predictor.train()
 
-            predictor.train()
-            top_pick = predictor.predict_next()
+            # 予測実行
+            predicted_num = predictor.predict_next()
 
-            prize, hit_type = evaluate_set_profit(actual_num, top_pick)
+            # 的中判定
+            prize, hit_type = evaluate_set_profit(actual_num, predicted_num)
             profit = prize - TICKET_COST
             total_return += prize
             total_cost += TICKET_COST
+
+            straight_hit = 1 if actual_num == predicted_num else 0
+            box_hit = 1 if actual_box == _box_key(predicted_num) else 0
+
             if hit_type == "セット・ストレート":
                 set_straight_hits += 1
             elif hit_type == "セット・ボックス":
@@ -1225,16 +1304,80 @@ class Numbers3MLBacktester:
                 {
                     "target_round": int(actual_row["回号"]) if pd.notna(actual_row["回号"]) else None,
                     "actual": actual_num,
-                    "set_pick": top_pick,
+                    "set_pick": predicted_num,
                     "set_hit": hit_type,
                     "set_prize": prize,
                     "set_profit": profit,
-                    "match_exact": int(actual_num == top_pick),
-                    "match_box": int(actual_box == _box_key(top_pick)),
+                    "match_exact": int(actual_num == predicted_num),
+                    "match_box": int(actual_box == _box_key(predicted_num)),
                 }
             )
 
+            if self.track_performance:
+                # テストデータの特徴量を取得
+                X_test = predictor._build_latest_features()
+
+                # 実際の各桁
+                actual_digits = {
+                    "n1": int(actual_num[0]),
+                    "n2": int(actual_num[1]),
+                    "n3": int(actual_num[2]),
+                }
+
+                # 各桁の的中状況
+                digit_accuracy = self._calculate_digit_accuracy(actual_num, predicted_num)
+
+                # Log-Lossと確率の計算
+                logloss_confidence = self._calculate_logloss_and_confidence(
+                    predictor, X_test, actual_digits
+                )
+
+                # ハイパーパラメータ（使用されたもの）
+                used_params = best_params if best_params else {}
+                learning_rate = used_params.get("learning_rate", 0.1)
+                num_leaves = used_params.get("num_leaves", 31)
+                max_depth = used_params.get("max_depth", -1)
+
+                # 累積損益とROI
+                cumulative_profit = total_return - total_cost
+                roi_percent = (cumulative_profit / total_cost * 100) if total_cost > 0 else 0
+
+                # レコードを作成
+                performance_record = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "backtest_id": backtest_id,
+                    "target_round": int(actual_row["回号"]) if pd.notna(actual_row["回号"]) else None,
+                    "actual_number": actual_num,
+                    "predicted_number": predicted_num,
+                    "model_type": "lightgbm",
+                    "window_size": self.window,
+                    "num_boost_round": self.num_boost_round,
+                    "learning_rate": learning_rate,
+                    "num_leaves": num_leaves,
+                    "max_depth": max_depth,
+                    "straight_hit": straight_hit,
+                    "box_hit": box_hit,
+                    **digit_accuracy,
+                    **logloss_confidence,
+                    "prize_amount": prize,
+                    "profit": profit,
+                    "cumulative_profit": cumulative_profit,
+                    "roi_percent": round(roi_percent, 2),
+                }
+                
+                performance_records.append(performance_record)
+
+                # 進捗表示
+                if (i + 1) % 10 == 0 or i == 0:
+                    print(
+                        f"[Round {i+1}/{total}] Target: {int(actual_row['回号'])} | "
+                        f"Predicted: {predicted_num} | Actual: {actual_num} | "
+                        f"Hit: {hit_type} | Cumulative: {cumulative_profit:+,}円"
+                    )
+
+
         result_df = pd.DataFrame(results)
+
         summary = {
             "tested": len(result_df),
             "set_straight_hits": set_straight_hits,
@@ -1248,9 +1391,144 @@ class Numbers3MLBacktester:
             "exact_hits": int(result_df["match_exact"].sum()) if not result_df.empty else 0,
             "box_hits": int(result_df["match_box"].sum()) if not result_df.empty else 0,
         }
+
+        if self.track_performance and performance_records:
+            performance_df = pd.DataFrame(performance_records)
+
+            self._ensure_csv_file(self.performance_csv, performance_df.columns)
+
+            if os.path.exists(self.performance_csv):
+                performance_df.to_csv(
+                    self.performance_csv,
+                    mode='a',
+                    header=False,
+                    index=False,
+                    encoding="utf-8-sig"
+                )
+            else:
+                performance_df.to_csv(
+                    self.performance_csv,
+                    index=False,
+                    encoding="utf-8-sig"
+                )
+
+            print(f"\n✓ Performance tracking saved to: {self.performance_csv}")
+            print(f"  Total records added: {len(performance_records)}")
+
+        # 特徴量重要度を保存（最後のモデルから）
+        if self.track_performance and predictor.models:
+            try:
+                importance_df = extract_feature_importance(
+                    predictor,
+                    save_path="results/feature_importance.csv"
+                )
+                print("\n✓ Feature importance saved to: results/feature_importance.csv")
+            except Exception as e:
+                print(f"\n⚠️  Could not save feature importance: {e}")
+
         return result_df, pd.DataFrame([summary])
 
+    @staticmethod
+    def _ensure_csv_file(filepath, columns):
+        if not filepath:
+            return
+        dir_name = os.path.dirname(filepath)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        if not os.path.exists(filepath):
+            return
 
+        try:
+            with open(filepath, "rb") as f:
+                header = f.read(4)
+        except Exception:
+            return
 
+        if not header.startswith(b"PK\x03\x04"):
+            return
+
+        backup_path = filepath + ".xlsx"
+        if not os.path.exists(backup_path):
+            shutil.move(filepath, backup_path)
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = filepath + f".{ts}.xlsx"
+            shutil.move(filepath, backup_path)
+
+        try:
+            df = pd.read_excel(backup_path)
+            schema_cols = {"カラム名", "データ型", "説明", "例"}
+            if schema_cols.issubset(set(df.columns)):
+                pd.DataFrame(columns=columns).to_csv(filepath, index=False, encoding="utf-8-sig")
+            else:
+                df.to_csv(filepath, index=False, encoding="utf-8-sig")
+        except Exception:
+            pd.DataFrame(columns=columns).to_csv(filepath, index=False, encoding="utf-8-sig")
+
+    @staticmethod
+    def _calculate_digit_accuracy(actual_str, predicted_str):
+        actual = str(actual_str).zfill(3)
+        predicted = str(predicted_str).zfill(3)
+
+        return {
+            "digit1_correct": 1 if actual[0] == predicted[0] else 0,
+            "digit2_correct": 1 if actual[1] == predicted[1] else 0,
+            "digit3_correct": 1 if actual[2] == predicted[2] else 0,
+        }
+
+    @staticmethod
+    def _calculate_logloss_and_confidence(predictor, X_test, actual_digits):
+        results = {}
+        digit_names = ["n1", "n2", "n3"]
+
+        for i, digit in enumerate(digit_names, 1):
+            # 予測確率を取得
+            proba = predictor.models[digit].predict_proba(X_test)[0]
+
+            # 実際の値
+            actual_digit = actual_digits[digit]
+
+            # Log-Loss計算（1サンプルのみ）
+            y_true = [actual_digit]
+            y_pred_proba = [proba]
+            logloss = log_loss(y_true, y_pred_proba, labels=list(range(10)))
+
+            # 予測された桁の確率
+            predicted_digit = int(np.argmax(proba))
+            confidence = proba[predicted_digit]
+
+            results[f"logloss_digit{i}"] = logloss
+            results[f"confidence_digit{i}"] = confidence
+
+        # 平均値
+        results["logloss_avg"] = np.mean([results[f"logloss_digit{i}"] for i in range(1, 4)])
+        results["confidence_avg"] = np.mean([results[f"confidence_digit{i}"] for i in range(1, 4)])
+
+        return results
+
+    @staticmethod
+    def save_performance_record(
+        record,
+        filepath="results/ml_performance_tracking.csv",
+        mode="append"
+    ):
+        # DataFrameに変換
+        df = pd.DataFrame([record])
+
+        # ディレクトリがなければ作成
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+        # ファイルが存在するかチェック
+        file_exists = os.path.exists(filepath)
+
+        if file_exists:
+            Numbers3MLBacktester._ensure_csv_file(filepath, df.columns)
+
+        if mode == "append" and os.path.exists(filepath):
+            # 追記モード
+            df.to_csv(filepath, mode="a", header=False, index=False, encoding="utf-8-sig")
+        else:
+            # 新規作成または上書き
+            df.to_csv(filepath, index=False, encoding="utf-8-sig")
 
 
