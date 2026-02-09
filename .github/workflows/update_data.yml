@@ -34,11 +34,12 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add numbers3_clean.csv
+
+          git add numbers3_clean.csv results/latest_prediction.csv
           
           # 変更がある場合のみ、最新を取り込んでからプッシュ
           if ! git diff --cached --quiet; then
-            git commit -m "Auto-update Numbers3 data"
-            git pull --rebase origin main
+            git commit -m "Auto-update Numbers3 data and prediction"
             git push origin main
           fi
+
