@@ -1,93 +1,107 @@
 import re
 import sys
 
-import os
 
-path = 'README.md'
-if len(sys.argv) > 1:
-    path = sys.argv[1]
-if not os.path.exists(path):
-    print(f'File not found: {path}')
-    sys.exit(1)
-with open(path, encoding='utf-8') as f:
-    lines = f.read().splitlines()
+def check_file(path):
+    with open(path, encoding='utf-8') as f:
+        lines = f.read().splitlines()
 
-issues = []
+    file_issues = []
 
-# Detect fenced code blocks and skip checks inside them
-in_fence = False
-fence_lang = None
-in_fence_lines = [False] * (len(lines) + 1)
-for i, line in enumerate(lines, start=1):
-    m = re.match(r'^```\s*(.*)$', line)
-    if m:
-        lang = m.group(1)
-        if not in_fence:
-            # opening fence
-            if lang.strip() == '':
-                issues.append((i, 'MD040', 'Fenced code block opening missing language'))
-            in_fence = True
-            fence_lang = lang
-            in_fence_lines[i] = True
+    # Detect fenced code blocks (only consider opening fences)
+    fence_lines = set()
+    in_fence = False
+    for i, line in enumerate(lines, start=1):
+        m = re.match(r'^```\s*(.*)$', line)
+        if m:
+            lang = m.group(1)
+            fence_lines.add(i)
+            if not in_fence:
+                if lang.strip() == '':
+                    file_issues.append((i, 'MD040', 'Fenced code block opening missing language'))
+                in_fence = True
+            else:
+                in_fence = False
+        elif in_fence:
+            fence_lines.add(i)
+
+    # Headings blank line before (MD022) — ignore inside code fences
+    for i, line in enumerate(lines, start=1):
+        if i in fence_lines:
+            continue
+        if re.match(r'^(#{1,6})\s+', line):
+            if i > 1 and lines[i - 2].strip() != '':
+                file_issues.append((i, 'MD022', 'Heading should be preceded by a blank line'))
+
+    # Lists should be surrounded by blank lines (MD032) — check top-level list blocks only
+    i = 1
+    while i <= len(lines):
+        if i in fence_lines:
+            i += 1
+            continue
+        line = lines[i - 1]
+        is_bullet = re.match(r'^[-*+]\s+', line)
+        is_ordered = re.match(r'^\d+\.\s+', line)
+        if is_bullet or is_ordered:
+            start = i
+            j = i
+            while j <= len(lines):
+                if j in fence_lines:
+                    break
+                next_line = lines[j - 1]
+                if next_line.strip() == '':
+                    break
+                is_list_item = re.match(r'^[-*+]\s+', next_line) or re.match(r'^\d+\.\s+', next_line)
+                is_continuation = next_line.startswith(' ') or next_line.startswith('\t')
+                if is_list_item or is_continuation:
+                    j += 1
+                else:
+                    break
+            end = j - 1
+            prev_blank = (start == 1) or (lines[start - 2].strip() == '')
+            prev_is_heading = (start > 1 and re.match(r'^(#{1,6})\s+', lines[start - 2]))
+            next_blank = (end == len(lines)) or (lines[end].strip() == '')
+            if not (prev_blank or prev_is_heading):
+                file_issues.append((start, 'MD032', 'List block should be preceded by a blank line'))
+            if not next_blank:
+                file_issues.append((end, 'MD032', 'List block should be followed by a blank line'))
+            i = j
         else:
-            # closing fence
-            in_fence_lines[i] = True
-            in_fence = False
-            fence_lang = None
-        continue
-    if in_fence:
-        in_fence_lines[i] = True
-        continue
+            i += 1
 
-# Headings blank line before (MD022)
-for i, line in enumerate(lines, start=1):
-    if in_fence_lines[i]:
-        continue
-    if re.match(r'^(#{1,6})\s+', line):
-        if i > 1 and lines[i-2].strip() != '':
-            issues.append((i, 'MD022', 'Heading should be preceded by a blank line'))
+    # Duplicate headings (MD024)
+    headings = {}
+    for i, line in enumerate(lines, start=1):
+        m = re.match(r'^(#{1,6})\s+(.*)$', line)
+        if m:
+            text = m.group(2).strip()
+            key = re.sub(r'`.*?`', '', text).strip().lower()
+            headings.setdefault(key, []).append(i)
+    for key, locs in headings.items():
+        if len(locs) > 1:
+            file_issues.append(
+                (locs[0], 'MD024', f"Duplicate heading '{key}' at lines: {', '.join(map(str, locs))}")
+            )
 
-# Lists should be surrounded by blank lines (MD032) — detect list blocks
-i = 1
-while i <= len(lines):
-    line = lines[i-1]
-    if re.match(r'^\s*[-*+]\s+', line):
-        # start of a list block
-        start = i
-        j = i
-        while j <= len(lines) and re.match(r'^\s*[-*+]\s+', lines[j-1]):
-            j += 1
-        end = j - 1
-        prev_blank = (start == 1) or (lines[start-2].strip() == '')
-        prev_is_heading = (start > 1 and re.match(r'^(#{1,6})\s+', lines[start-2]))
-        prev_is_numbered = (start > 1 and re.match(r'^\s*\d+\.\s+', lines[start-2]))
-        prev_ends_with_colon = (start > 1 and lines[start-2].rstrip().endswith(':'))
-        next_blank = (end == len(lines)) or (lines[end].strip() == '')
-        if not (prev_blank or prev_is_heading or prev_is_numbered or prev_ends_with_colon):
-            issues.append((start, 'MD032', 'List block should be preceded by a blank line'))
-        if not next_blank:
-            issues.append((end, 'MD032', 'List block should be followed by a blank line'))
-        i = j
-    else:
-        i += 1
+    return file_issues
 
-# Duplicate headings (MD024)
-headings = {}
-for i, line in enumerate(lines, start=1):
-    m = re.match(r'^(#{1,6})\s+(.*)$', line)
-    if m:
-        text = m.group(2).strip()
-        key = re.sub(r'`.*?`', '', text).strip().lower()
-        headings.setdefault(key, []).append(i)
-for k, locs in headings.items():
-    if len(locs) > 1:
-        issues.append((locs[0], 'MD024', f"Duplicate heading '{k}' at lines: {', '.join(map(str, locs))}"))
 
-if issues:
-    print('Found issues:')
-    for line_no, code, msg in issues:
-        print(f'{code} at line {line_no}: {msg}')
-    sys.exit(2)
-else:
+def main():
+    paths = sys.argv[1:] or ['README.md']
+    issues = []
+
+    for path in paths:
+        issues.extend([(path, *issue) for issue in check_file(path)])
+
+    if issues:
+        print('Found issues:')
+        for path, line_no, code, msg in issues:
+            print(f'{path}: {code} at line {line_no}: {msg}')
+        sys.exit(2)
+
     print('No issues found')
     sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()
