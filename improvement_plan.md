@@ -13,6 +13,7 @@
 ### フェーズ1: 精度可視化システムの構築【最優先】
 
 #### 1-1. 機械学習モデルの精度追跡システム
+
 **目的**: LightGBMモデルの精度が向上しているか定量的に確認
 
 **実装内容**:
@@ -49,7 +50,6 @@
 **具体的な実装手順**:
 
 ```python
-
 # 1. Numbers3MLBacktesterクラスを拡張
 
 # - run()メソッドでLog-Lossを計算
@@ -75,7 +75,9 @@
 
 ---
 
+
 #### 1-2. ルールベースモデルとの比較分析
+
 **目的**: 機械学習とルールベースのどちらが優れているか判定
 
 **実装内容**:
@@ -87,11 +89,11 @@
 
 2. **比較レポートの自動生成**
 
-    - Jupyter Notebookで以下を比較:
-       - 的中率
-       - ROI
-       - 連続的中回数
-       - 最大損失額
+   - Jupyter Notebookで以下を比較:
+     - 的中率
+     - ROI
+     - 連続的中回数
+     - 最大損失額
 
 **成果物**:
 
@@ -100,65 +102,69 @@
 
 ---
 
+
 ### フェーズ2: アプリケーションの改善
 
 #### 2-1. Streamlitアプリの改善
-**目的**: 簡潔で分かりやすい予測結果の表示
+
+**目的**: 簡潔で分かりやすい予測結果を表示
 
 **改善内容**:
 
 1. **予測タブの改善**
 
-    - 予測番号に加えて以下を表示:
-       - **スコア**: 総合スコア（0-100の正規化された値）
-       - **各桁の確率**: 各桁が選ばれた確率（機械学習の場合）
-       - **根拠**: 簡潔な1-2行の説明（例: "直近20回で頻出、合計値が平均的"）
-   
+   - 予測番号に加えて以下を表示:
+    - **スコア**: 総合スコア（0-100の正規化された値）
+    - **各桁の確率**: 各桁が選ばれた確率（機械学習の場合）
+    - **根拠**: 簡潔な1-2行の説明（例: "直近20回で頻出、合計値が平均的"）
+
 2. **機械学習予測の統合**
 
-    - 新しいタブ「AI予測（LightGBM）」を追加
-    - 以下を表示:
-       - 予測番号
-       - 各桁の予測確率（Top3）
-       - モデルの信頼度スコア
-       - 過去の的中率
+   - 新しいタブ「AI予測（LightGBM）」を追加
+   - 以下を表示:
+    - 予測番号
+    - 各桁の予測確率（Top3）
+    - モデルの信頼度スコア
+    - 過去の的中率
 
 3. **ダッシュボード機能の追加**
 
-    - トップページに以下のサマリーを表示:
-       - 最新の予測結果（ルールベース、機械学習）
-       - 過去1ヶ月の的中率
-       - ROI推移グラフ（ミニグラフ）
+   - トップページに以下のサマリーを表示:
+    - 最新の予測結果（ルールベース、機械学習）
+    - 過去1ヶ月の的中率
+    - ROI推移グラフ（ミニグラフ）
 
 **実装例**:
+
 ```python
 # app.pyに以下を追加
 
 # 新しいタブ: AI予測
 with tab_ai_prediction:
-    st.header("AI予測（LightGBM）")
-    
-    if st.button("AI予測実行"):
-        ml_predictor = Numbers3MLPredictor(df)
-        ml_predictor.train()
-        prediction = ml_predictor.predict_next()
-        
-        # 各桁の確率を取得
-        probas = {}
-        for digit in ["n1", "n2", "n3"]:
-            proba = ml_predictor.models[digit].predict_proba(X_test)
-            probas[digit] = proba[0]
-        
-        st.success(f"予測番号: {prediction}")
-        
-        # 各桁のTop3確率を表示
-        col1, col2, col3 = st.columns(3)
-        for i, (digit, col) in enumerate(zip(["n1", "n2", "n3"], [col1, col2, col3])):
-            col.metric(f"{['百', '十', '一'][i]}の位", prediction[i])
-            top3 = np.argsort(probas[digit])[-3:][::-1]
-            col.write("確率Top3:")
-            for rank, idx in enumerate(top3, 1):
-                col.write(f"{rank}. {idx}桁: {probas[digit][idx]:.2%}")
+   st.header("AI予測（LightGBM）")
+
+   if st.button("AI予測実行"):
+      ml_predictor = Numbers3MLPredictor(df)
+      ml_predictor.train()
+      prediction = ml_predictor.predict_next()
+
+      # 各桁の確率を取得
+      probas = {}
+      for digit in ["n1", "n2", "n3"]:
+         proba = ml_predictor.models[digit].predict_proba(X_test)
+         probas[digit] = proba[0]
+
+      st.success(f"予測番号: {prediction}")
+
+      # 各桁のTop3確率を表示
+      col1, col2, col3 = st.columns(3)
+      for i, (digit, col) in enumerate(zip(["n1", "n2", "n3"], [col1, col2, col3])):
+         col.metric(f"{['百', '十', '一'][i]}の位", prediction[i])
+         top3 = np.argsort(probas[digit])[-3:][::-1]
+         col.write("確率Top3:")
+         for rank, idx in enumerate(top3, 1):
+            col.write(f"{rank}. {idx}桁: {probas[digit][idx]:.2%}")
+
 ```
 
 ---
@@ -219,6 +225,7 @@ with tab_ai_prediction:
 **目的**: `numbers3_logic.py`が肥大化しているため、役割ごとに分割
 
 **新しいファイル構成**:
+
 ```text
 project/
 ├── app.py                          # Streamlitアプリ
@@ -384,15 +391,15 @@ project/
 
 ### 優先度：中
 
-4. `analysis_detailed.ipynb`の作成
-5. Streamlitアプリに機械学習予測タブを追加
-6. モデル比較分析ノートブックの作成
+1. `analysis_detailed.ipynb`の作成
+2. Streamlitアプリに機械学習予測タブを追加
+3. モデル比較分析ノートブックの作成
 
 ### 優先度：低
 
-7. コードのリファクタリング
-8. アンサンブル予測の実装
-9. 自動再学習機能の追加
+1. コードのリファクタリング
+2. アンサンブル予測の実装
+3. 自動再学習機能の追加
 
 ---
 
