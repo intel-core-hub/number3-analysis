@@ -22,7 +22,7 @@ class TestScraping(unittest.TestCase):
                 raise ValueError("primary failed")
             return tables
 
-        with patch("numbers3_logic._read_html_tables", side_effect=fake_read_html):
+        with patch("src.data.fetcher._read_html_tables", side_effect=fake_read_html):
             df, failures = fetch_numbers3_by_month(
                 datetime(2020, 1, 1),
                 datetime(2020, 1, 1),
@@ -37,7 +37,7 @@ class TestScraping(unittest.TestCase):
         def fake_read_html(url, timeout=10, retries=3, backoff=1.5):
             raise ValueError("boom")
 
-        with patch("numbers3_logic._read_html_tables", side_effect=fake_read_html):
+        with patch("src.data.fetcher._read_html_tables", side_effect=fake_read_html):
             df, failures = fetch_numbers3_by_month(
                 datetime(2020, 1, 1),
                 datetime(2020, 1, 1),

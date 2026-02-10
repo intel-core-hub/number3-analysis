@@ -1,0 +1,19 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Repomix (Generate AI Context)",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "repomix_runner.py"
+            ],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "detail": "Generate a single text file from the codebase for AI context."
+        }
+    ]
+}

@@ -8,3 +8,7 @@ html5lib
 requests
 lightgbm
 scikit-learn
+optuna
+plotly
+scipy
+streamlit
