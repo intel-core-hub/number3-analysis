@@ -1,0 +1,45 @@
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+.venv/
+venv/
+
+logs/*.log
+results/*.log
+results/*.bak
+results/*.xlsx
+
+repomix-output*.xml
+temp_run_advanced_clean.ipynb
+*_backup.md
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# Ruff cache
+.ruff_cache/
+
+# Temporary output files
+out*.txt
+err*.txt
+output.txt
+mypy_out.txt
+coverage_out.txt
+
+# Local generated artifacts
+artifacts/
+models/
+data/
+results/
+notebooks/results/
+*.parquet
+*.db
