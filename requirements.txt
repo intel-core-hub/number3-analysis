@@ -1,14 +1,4 @@
 pandas
-numpy
-matplotlib
-seaborn
-beautifulsoup4
-lxml
-html5lib
+pyarrow
 requests
-lightgbm
-scikit-learn
-optuna
-plotly
-scipy
 streamlit

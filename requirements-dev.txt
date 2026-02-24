@@ -1,0 +1,17 @@
+-r requirements.txt
+
+numpy
+matplotlib
+seaborn
+beautifulsoup4
+lxml
+html5lib
+lightgbm
+scikit-learn
+optuna
+plotly
+scipy
+jupyter
+notebook
+ipykernel
+shap
