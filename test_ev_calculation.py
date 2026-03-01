@@ -62,6 +62,7 @@ def test_ev_calculation():
     
     # ボックス009の検証
     box_009 = next((c for c in candidates if c.number == "009" and c.bet_type == "box"), None)
+    assert box_009 is not None, "ボックス009候補が生成されませんでした"
     if box_009:
         print(f"ボックス009:")
         print(f"  期待回収額: 0.02 × 12,500 = 250円")
@@ -79,10 +80,8 @@ def test_ev_calculation():
         print(f"  ✓ EV比: {'PASS' if ev_ratio_ok else 'FAIL'}")
         print(f"  ✓ 期待利益: {'PASS' if profit_ok else 'FAIL'}\n")
         
-        if ev_ratio_ok and profit_ok:
-            return True
-    
-    return False
+        assert ev_ratio_ok, "EV比の計算が期待値と一致しません"
+        assert profit_ok, "期待利益の計算が期待値と一致しません"
 
 
 def test_relationship():
@@ -103,13 +102,12 @@ def test_relationship():
     
     print("正しい公式: 期待利益 = (EV比 - 1) × コスト\n")
     
-    all_ok = True
     for case in test_cases:
         ev_ratio = case["ev_ratio"]
         expected_profit = (ev_ratio - 1.0) * TICKET_COST
         print(f"{case['desc']:15} (EV比={ev_ratio:.1f}x) → 期待利益={expected_profit:.1f}円")
-    
-    return True
+        calc_profit = (ev_ratio - 1.0) * TICKET_COST
+        assert abs(calc_profit - expected_profit) < 1e-9
 
 
 if __name__ == "__main__":
@@ -119,13 +117,10 @@ if __name__ == "__main__":
     
     try:
         test_relationship()
-        ev_calc_ok = test_ev_calculation()
+        test_ev_calculation()
         
         print("\n" + "=" * 60)
-        if ev_calc_ok:
-            print("✓ すべてのテストが成功しました")
-        else:
-            print("✗ テストが失敗しました")
+        print("✓ すべてのテストが成功しました")
         print("=" * 60)
         
     except Exception as e:

@@ -44,6 +44,7 @@ def test_csv_export_consistency():
     # ボックス009を抽出
     box_009 = next((c for c in candidates if c.number == "009" and c.bet_type == "box"), None)
     
+    assert box_009 is not None, "ボックス009候補が生成されませんでした"
     if box_009:
         print(f"ボックス009テスト:")
         print(f"  入力確率: 1.88%")
@@ -70,9 +71,8 @@ def test_csv_export_consistency():
         print(f"  ✓ EV比一致性: {'PASS' if ev_ratio_match else 'FAIL'}")
         print(f"  ✓ 期待利益一致性: {'PASS' if profit_match else 'FAIL'}\n")
         
-        return ev_ratio_match and profit_match
-    
-    return False
+        assert ev_ratio_match, "EV比一致性がFAILです"
+        assert profit_match, "期待利益一致性がFAILです"
 
 
 def test_ev_threshold_filtering():
@@ -120,7 +120,7 @@ def test_ev_threshold_filtering():
             status = "✓" if match else "✗"
             print(f"  {c.number}: EV比={c.ev_ratio:.3f}x → 期待利益={c.expected_value:.1f}円 {status}")
     
-    return True
+    assert isinstance(filtered, list)
 
 
 def test_backtest_consistency():
@@ -159,7 +159,7 @@ def test_backtest_consistency():
     
     print(f"\n全体一貫性: {'PASS' if all_consistent else 'FAIL'}")
     
-    return all_consistent
+    assert all_consistent, "バックテスト結果のEV整合性に不一致があります"
 
 
 if __name__ == "__main__":
@@ -168,17 +168,12 @@ if __name__ == "__main__":
     print("=" * 70)
     
     try:
-        all_pass = True
-        
-        all_pass &= test_csv_export_consistency()
-        all_pass &= test_ev_threshold_filtering()
-        all_pass &= test_backtest_consistency()
+        test_csv_export_consistency()
+        test_ev_threshold_filtering()
+        test_backtest_consistency()
         
         print("\n" + "=" * 70)
-        if all_pass:
-            print("✓ すべての検証テストが成功しました")
-        else:
-            print("✗ いくつかの検証テストが失敗しました")
+        print("✓ すべての検証テストが成功しました")
         print("=" * 70)
         
     except Exception as e:
